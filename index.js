@@ -62,12 +62,44 @@ function callClaude(messages) {
 }
 
 const server = http.createServer(async (req, res) => {
+
+  // CORS headers — allow website widget to call this backend
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
   if (req.method === 'GET') {
     res.writeHead(200, {'Content-Type': 'text/plain'});
     res.end('Esh-har Spirit Guide WhatsApp Bot is running! ✦');
     return;
   }
 
+  // ── WEBSITE CHAT ENDPOINT ──
+  if (req.method === 'POST' && req.url === '/chat') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { messages } = JSON.parse(body);
+        const reply = await callClaude(messages);
+        res.writeHead(200, {'Content-Type': 'application/json'});
+        res.end(JSON.stringify({ reply }));
+      } catch(err) {
+        console.error('Chat error:', err.message);
+        res.writeHead(200, {'Content-Type': 'application/json'});
+        res.end(JSON.stringify({ reply: 'Beloved, I am momentarily still. Please try again shortly. ✦' }));
+      }
+    });
+    return;
+  }
+
+  // ── WHATSAPP WEBHOOK ──
   if (req.method === 'POST' && req.url === '/webhook') {
     let body = '';
     req.on('data', chunk => body += chunk);
@@ -116,4 +148,3 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Esh-har Spirit Guide running on port ${PORT}`);
 });
-
