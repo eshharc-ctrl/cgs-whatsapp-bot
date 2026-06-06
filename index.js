@@ -2,60 +2,76 @@ const https = require('https');
 const http = require('http');
 const querystring = require('querystring');
 
-const nodemailer = require('nodemailer');
-
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
-const GMAIL_USER = process.env.GMAIL_USER;
-const GMAIL_PASS = process.env.GMAIL_PASS;
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
+const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL || 'eshharc@gmail.com';
 
-// ── EMAIL ORDER NOTIFICATION ──────────────────────────────────────────────────
+// ── EMAIL ORDER NOTIFICATION via SendGrid ─────────────────────────────────────
 function sendOrderEmail(items, customer, total) {
-  if (!GMAIL_USER || !GMAIL_PASS) {
-    console.log('[EMAIL] Gmail not configured — skipping');
+  if (!SENDGRID_API_KEY) {
+    console.log('[EMAIL] SendGrid not configured — skipping');
     return;
   }
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user: GMAIL_USER, pass: GMAIL_PASS }
-  });
+
   const itemLines = items.map(i =>
     `• ${i.name} (${i.size}) x${i.qty} — $${(i.price * i.qty).toFixed(2)}`
   ).join('\n');
-  const mailOptions = {
-    from: GMAIL_USER,
-    to: GMAIL_USER,
-    subject: `✦ New Order — $${total.toFixed(2)} from ${customer.name}`,
-    text: [
-      'NEW ORDER — CG\'s Apothecary',
-      '================================',
-      '',
-      'CUSTOMER',
-      `Name:  ${customer.name}`,
-      `Email: ${customer.email}`,
-      `Phone: ${customer.phone || 'Not provided'}`,
-      '',
-      'SHIP TO',
-      customer.addr1,
-      `${customer.city}, ${customer.state} ${customer.zip}`,
-      customer.country,
-      '',
-      'ITEMS',
-      itemLines,
-      '',
-      `TOTAL: $${total.toFixed(2)}`,
-      '',
-      'NOTES',
-      customer.notes || 'None',
-      '',
-      '================================',
-      'theunmuteateshharc.earth'
-    ].join('\n')
-  };
-  transporter.sendMail(mailOptions, (err, info) => {
-    if (err) console.error('[EMAIL] Error:', err.message);
-    else console.log('[EMAIL] Sent:', info.response);
+
+  const emailText = [
+    "NEW ORDER — CG's Apothecary",
+    '================================',
+    '',
+    'CUSTOMER',
+    `Name:  ${customer.name}`,
+    `Email: ${customer.email}`,
+    `Phone: ${customer.phone || 'Not provided'}`,
+    '',
+    'SHIP TO',
+    customer.addr1,
+    `${customer.city}, ${customer.state} ${customer.zip}`,
+    customer.country,
+    '',
+    'ITEMS',
+    itemLines,
+    '',
+    `TOTAL: $${total.toFixed(2)}`,
+    '',
+    'NOTES',
+    customer.notes || 'None',
+    '',
+    '================================',
+    'theunmuteateshharc.earth'
+  ].join('\n');
+
+  const payload = JSON.stringify({
+    personalizations: [{ to: [{ email: NOTIFY_EMAIL }] }],
+    from: { email: NOTIFY_EMAIL, name: "CG's Apothecary" },
+    subject: `New Order — $${total.toFixed(2)} from ${customer.name}`,
+    content: [{ type: 'text/plain', value: emailText }]
   });
+
+  const options = {
+    hostname: 'api.sendgrid.com',
+    path: '/v3/mail/send',
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${SENDGRID_API_KEY}`,
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(payload)
+    }
+  };
+
+  const req = https.request(options, (res) => {
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      console.log('[EMAIL] Order notification sent successfully');
+    } else {
+      console.error('[EMAIL] SendGrid error status:', res.statusCode);
+    }
+  });
+  req.on('error', (err) => console.error('[EMAIL] Error:', err.message));
+  req.write(payload);
+  req.end();
 }
 
 const SYSTEM = `You are the Esh-har Spirit Guide for CG's Apothecary by Esh-har Collections. You respond to customers via WhatsApp.
