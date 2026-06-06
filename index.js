@@ -2,8 +2,61 @@ const https = require('https');
 const http = require('http');
 const querystring = require('querystring');
 
+const nodemailer = require('nodemailer');
+
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+const GMAIL_USER = process.env.GMAIL_USER;
+const GMAIL_PASS = process.env.GMAIL_PASS;
+
+// ── EMAIL ORDER NOTIFICATION ──────────────────────────────────────────────────
+function sendOrderEmail(items, customer, total) {
+  if (!GMAIL_USER || !GMAIL_PASS) {
+    console.log('[EMAIL] Gmail not configured — skipping');
+    return;
+  }
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: GMAIL_USER, pass: GMAIL_PASS }
+  });
+  const itemLines = items.map(i =>
+    `• ${i.name} (${i.size}) x${i.qty} — $${(i.price * i.qty).toFixed(2)}`
+  ).join('\n');
+  const mailOptions = {
+    from: GMAIL_USER,
+    to: GMAIL_USER,
+    subject: `✦ New Order — $${total.toFixed(2)} from ${customer.name}`,
+    text: [
+      'NEW ORDER — CG\'s Apothecary',
+      '================================',
+      '',
+      'CUSTOMER',
+      `Name:  ${customer.name}`,
+      `Email: ${customer.email}`,
+      `Phone: ${customer.phone || 'Not provided'}`,
+      '',
+      'SHIP TO',
+      customer.addr1,
+      `${customer.city}, ${customer.state} ${customer.zip}`,
+      customer.country,
+      '',
+      'ITEMS',
+      itemLines,
+      '',
+      `TOTAL: $${total.toFixed(2)}`,
+      '',
+      'NOTES',
+      customer.notes || 'None',
+      '',
+      '================================',
+      'theunmuteateshharc.earth'
+    ].join('\n')
+  };
+  transporter.sendMail(mailOptions, (err, info) => {
+    if (err) console.error('[EMAIL] Error:', err.message);
+    else console.log('[EMAIL] Sent:', info.response);
+  });
+}
 
 const SYSTEM = `You are the Esh-har Spirit Guide for CG's Apothecary by Esh-har Collections. You respond to customers via WhatsApp.
 
@@ -180,6 +233,10 @@ const server = http.createServer(async (req, res) => {
 
         console.log(`[ORDER] ${customer.name} | ${customer.email} | ${items.length} items`);
         const checkoutUrl = await createStripeCheckout(items, customer);
+
+        // Calculate total and send email notification
+        const total = items.reduce((sum, i) => sum + (i.price * i.qty), 0);
+        sendOrderEmail(items, customer, total);
 
         res.writeHead(200, {'Content-Type': 'application/json'});
         res.end(JSON.stringify({ url: checkoutUrl }));
