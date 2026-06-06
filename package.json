@@ -6,7 +6,5 @@
   "scripts": {
     "start": "node index.js"
   },
-  "dependencies": {
-    "nodemailer": "^6.9.13"
-  }
+  "dependencies": {}
 }
