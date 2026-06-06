@@ -3,6 +3,7 @@ const http = require('http');
 const querystring = require('querystring');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 
 const SYSTEM = `You are the Esh-har Spirit Guide for CG's Apothecary by Esh-har Collections. You respond to customers via WhatsApp.
 
@@ -61,6 +62,64 @@ function callClaude(messages) {
   });
 }
 
+// ── STRIPE CHECKOUT SESSION CREATOR ──────────────────────────────────────────
+function createStripeCheckout(items, customer) {
+  return new Promise((resolve, reject) => {
+
+    // Build form-encoded line_items for Stripe API
+    const params = [];
+    items.forEach((item, i) => {
+      params.push(`line_items[${i}][price_data][currency]=usd`);
+      params.push(`line_items[${i}][price_data][product_data][name]=${encodeURIComponent(item.name + ' (' + item.size + ')')}`);
+      params.push(`line_items[${i}][price_data][unit_amount]=${Math.round(item.price * 100)}`);
+      params.push(`line_items[${i}][quantity]=${item.qty}`);
+    });
+
+    params.push('mode=payment');
+    params.push(`customer_email=${encodeURIComponent(customer.email)}`);
+    params.push(`success_url=${encodeURIComponent('https://www.theunmuteateshharc.earth/apothecary?order=success')}`);
+    params.push(`cancel_url=${encodeURIComponent('https://www.theunmuteateshharc.earth/apothecary?order=cancelled')}`);
+    params.push(`metadata[customer_name]=${encodeURIComponent(customer.name)}`);
+    params.push(`metadata[phone]=${encodeURIComponent(customer.phone || '')}`);
+    params.push(`metadata[shipping]=${encodeURIComponent(customer.addr1 + ', ' + customer.city + ', ' + customer.state + ' ' + customer.zip)}`);
+    params.push(`metadata[notes]=${encodeURIComponent((customer.notes || '').substring(0, 200))}`);
+    params.push('payment_intent_data[description]=' + encodeURIComponent("CG's Apothecary Order — " + customer.name));
+
+    const postBody = params.join('&');
+
+    const options = {
+      hostname: 'api.stripe.com',
+      path: '/v1/checkout/sessions',
+      method: 'POST',
+      headers: {
+        'Authorization': 'Basic ' + Buffer.from(STRIPE_SECRET_KEY + ':').toString('base64'),
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(postBody)
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const session = JSON.parse(data);
+          if (session.url) {
+            resolve(session.url);
+          } else {
+            reject(new Error('Stripe error: ' + data));
+          }
+        } catch(e) { reject(e); }
+      });
+    });
+
+    req.on('error', reject);
+    req.write(postBody);
+    req.end();
+  });
+}
+
+// ── HTTP SERVER ───────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
 
   // CORS headers — allow website widget to call this backend
@@ -94,6 +153,41 @@ const server = http.createServer(async (req, res) => {
         console.error('Chat error:', err.message);
         res.writeHead(200, {'Content-Type': 'application/json'});
         res.end(JSON.stringify({ reply: 'Beloved, I am momentarily still. Please try again shortly. ✦' }));
+      }
+    });
+    return;
+  }
+
+  // ── STRIPE CHECKOUT ENDPOINT ──
+  if (req.method === 'POST' && req.url === '/create-checkout') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { items, customer } = JSON.parse(body);
+
+        if (!items || items.length === 0) {
+          res.writeHead(400, {'Content-Type': 'application/json'});
+          res.end(JSON.stringify({ error: 'No items in cart' }));
+          return;
+        }
+
+        if (!STRIPE_SECRET_KEY) {
+          res.writeHead(500, {'Content-Type': 'application/json'});
+          res.end(JSON.stringify({ error: 'Stripe not configured' }));
+          return;
+        }
+
+        console.log(`[ORDER] ${customer.name} | ${customer.email} | ${items.length} items`);
+        const checkoutUrl = await createStripeCheckout(items, customer);
+
+        res.writeHead(200, {'Content-Type': 'application/json'});
+        res.end(JSON.stringify({ url: checkoutUrl }));
+
+      } catch(err) {
+        console.error('Checkout error:', err.message);
+        res.writeHead(500, {'Content-Type': 'application/json'});
+        res.end(JSON.stringify({ error: 'Failed to create checkout' }));
       }
     });
     return;
