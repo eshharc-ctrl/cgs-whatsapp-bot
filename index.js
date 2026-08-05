@@ -1,78 +1,10 @@
 const https = require('https');
 const http = require('http');
 const querystring = require('querystring');
+const url = require('url');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
-const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
-const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL || 'eshharc@gmail.com';
-
-// ── EMAIL ORDER NOTIFICATION via SendGrid ─────────────────────────────────────
-function sendOrderEmail(items, customer, total) {
-  if (!SENDGRID_API_KEY) {
-    console.log('[EMAIL] SendGrid not configured — skipping');
-    return;
-  }
-
-  const itemLines = items.map(i =>
-    `• ${i.name} (${i.size}) x${i.qty} — $${(i.price * i.qty).toFixed(2)}`
-  ).join('\n');
-
-  const emailText = [
-    "NEW ORDER — CG's Apothecary",
-    '================================',
-    '',
-    'CUSTOMER',
-    `Name:  ${customer.name}`,
-    `Email: ${customer.email}`,
-    `Phone: ${customer.phone || 'Not provided'}`,
-    '',
-    'SHIP TO',
-    customer.addr1,
-    `${customer.city}, ${customer.state} ${customer.zip}`,
-    customer.country,
-    '',
-    'ITEMS',
-    itemLines,
-    '',
-    `TOTAL: $${total.toFixed(2)}`,
-    '',
-    'NOTES',
-    customer.notes || 'None',
-    '',
-    '================================',
-    'theunmuteateshharc.earth'
-  ].join('\n');
-
-  const payload = JSON.stringify({
-    personalizations: [{ to: [{ email: NOTIFY_EMAIL }] }],
-    from: { email: NOTIFY_EMAIL, name: "CG's Apothecary" },
-    subject: `New Order — $${total.toFixed(2)} from ${customer.name}`,
-    content: [{ type: 'text/plain', value: emailText }]
-  });
-
-  const options = {
-    hostname: 'api.sendgrid.com',
-    path: '/v3/mail/send',
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${SENDGRID_API_KEY}`,
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(payload)
-    }
-  };
-
-  const req = https.request(options, (res) => {
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      console.log('[EMAIL] Order notification sent successfully');
-    } else {
-      console.error('[EMAIL] SendGrid error status:', res.statusCode);
-    }
-  });
-  req.on('error', (err) => console.error('[EMAIL] Error:', err.message));
-  req.write(payload);
-  req.end();
-}
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'cgsapothecary2024';
 
 const SYSTEM = `You are the Esh-har Spirit Guide for CG's Apothecary by Esh-har Collections. You respond to customers via WhatsApp.
 
@@ -131,177 +63,143 @@ function callClaude(messages) {
   });
 }
 
-// ── STRIPE CHECKOUT SESSION CREATOR ──────────────────────────────────────────
-function createStripeCheckout(items, customer) {
+function sendWhatsAppReply(phoneNumberId, to, message, accessToken) {
   return new Promise((resolve, reject) => {
-
-    // Build form-encoded line_items for Stripe API
-    const params = [];
-    items.forEach((item, i) => {
-      params.push(`line_items[${i}][price_data][currency]=usd`);
-      params.push(`line_items[${i}][price_data][product_data][name]=${encodeURIComponent(item.name + ' (' + item.size + ')')}`);
-      params.push(`line_items[${i}][price_data][unit_amount]=${Math.round(item.price * 100)}`);
-      params.push(`line_items[${i}][quantity]=${item.qty}`);
+    const body = JSON.stringify({
+      messaging_product: 'whatsapp',
+      to: to,
+      text: { body: message }
     });
-
-    params.push('mode=payment');
-    params.push(`customer_email=${encodeURIComponent(customer.email)}`);
-    params.push(`success_url=${encodeURIComponent('https://www.theunmuteateshharc.earth/apothecary?order=success')}`);
-    params.push(`cancel_url=${encodeURIComponent('https://www.theunmuteateshharc.earth/apothecary?order=cancelled')}`);
-    params.push(`metadata[customer_name]=${encodeURIComponent(customer.name)}`);
-    params.push(`metadata[phone]=${encodeURIComponent(customer.phone || '')}`);
-    params.push(`metadata[shipping]=${encodeURIComponent(customer.addr1 + ', ' + customer.city + ', ' + customer.state + ' ' + customer.zip)}`);
-    params.push(`metadata[notes]=${encodeURIComponent((customer.notes || '').substring(0, 200))}`);
-    params.push('payment_intent_data[description]=' + encodeURIComponent("CG's Apothecary Order — " + customer.name));
-
-    const postBody = params.join('&');
-
     const options = {
-      hostname: 'api.stripe.com',
-      path: '/v1/checkout/sessions',
+      hostname: 'graph.facebook.com',
+      path: `/v18.0/${phoneNumberId}/messages`,
       method: 'POST',
       headers: {
-        'Authorization': 'Basic ' + Buffer.from(STRIPE_SECRET_KEY + ':').toString('base64'),
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Content-Length': Buffer.byteLength(postBody)
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Length': Buffer.byteLength(body)
       }
     };
-
     const req = https.request(options, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          const session = JSON.parse(data);
-          if (session.url) {
-            resolve(session.url);
-          } else {
-            reject(new Error('Stripe error: ' + data));
-          }
-        } catch(e) { reject(e); }
-      });
+      res.on('end', () => resolve(data));
     });
-
     req.on('error', reject);
-    req.write(postBody);
+    req.write(body);
     req.end();
   });
 }
 
-// ── HTTP SERVER ───────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
+  const parsedUrl = url.parse(req.url, true);
 
-  // CORS headers — allow website widget to call this backend
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
-  if (req.method === 'GET') {
+  // Health check
+  if (req.method === 'GET' && parsedUrl.pathname === '/') {
     res.writeHead(200, {'Content-Type': 'text/plain'});
     res.end('Esh-har Spirit Guide WhatsApp Bot is running! ✦');
     return;
   }
 
-  // ── WEBSITE CHAT ENDPOINT ──
-  if (req.method === 'POST' && req.url === '/chat') {
-    let body = '';
-    req.on('data', chunk => body += chunk);
-    req.on('end', async () => {
-      try {
-        const { messages } = JSON.parse(body);
-        const reply = await callClaude(messages);
-        res.writeHead(200, {'Content-Type': 'application/json'});
-        res.end(JSON.stringify({ reply }));
-      } catch(err) {
-        console.error('Chat error:', err.message);
-        res.writeHead(200, {'Content-Type': 'application/json'});
-        res.end(JSON.stringify({ reply: 'Beloved, I am momentarily still. Please try again shortly. ✦' }));
-      }
-    });
+  // Meta webhook verification (GET)
+  if (req.method === 'GET' && parsedUrl.pathname === '/webhook') {
+    const mode = parsedUrl.query['hub.mode'];
+    const token = parsedUrl.query['hub.verify_token'];
+    const challenge = parsedUrl.query['hub.challenge'];
+
+    console.log(`Webhook verify: mode=${mode}, token=${token}`);
+
+    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+      console.log('Webhook verified!');
+      res.writeHead(200, {'Content-Type': 'text/plain'});
+      res.end(challenge);
+    } else {
+      console.log('Webhook verification failed');
+      res.writeHead(403);
+      res.end('Forbidden');
+    }
     return;
   }
 
-  // ── STRIPE CHECKOUT ENDPOINT ──
-  if (req.method === 'POST' && req.url === '/create-checkout') {
+  // Twilio webhook (POST) - legacy support
+  if (req.method === 'POST' && parsedUrl.pathname === '/webhook') {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', async () => {
       try {
-        const { items, customer } = JSON.parse(body);
-
-        if (!items || items.length === 0) {
-          res.writeHead(400, {'Content-Type': 'application/json'});
-          res.end(JSON.stringify({ error: 'No items in cart' }));
-          return;
+        // Try Meta Cloud API format first
+        let data;
+        try {
+          data = JSON.parse(body);
+        } catch(e) {
+          data = null;
         }
 
-        if (!STRIPE_SECRET_KEY) {
-          res.writeHead(500, {'Content-Type': 'application/json'});
-          res.end(JSON.stringify({ error: 'Stripe not configured' }));
-          return;
-        }
+        if (data && data.object === 'whatsapp_business_account') {
+          // Meta Cloud API format
+          const entry = data.entry && data.entry[0];
+          const changes = entry && entry.changes && entry.changes[0];
+          const value = changes && changes.value;
+          const messages = value && value.messages;
 
-        console.log(`[ORDER] ${customer.name} | ${customer.email} | ${items.length} items`);
-        const checkoutUrl = await createStripeCheckout(items, customer);
+          if (messages && messages[0]) {
+            const msg = messages[0];
+            const from = msg.from;
+            const text = msg.text && msg.text.body;
+            const phoneNumberId = value.metadata && value.metadata.phone_number_id;
+            const accessToken = process.env.META_ACCESS_TOKEN;
 
-        // Calculate total and send email notification
-        const total = items.reduce((sum, i) => sum + (i.price * i.qty), 0);
-        sendOrderEmail(items, customer, total);
+            console.log(`[Meta IN] ${from}: ${text}`);
 
-        res.writeHead(200, {'Content-Type': 'application/json'});
-        res.end(JSON.stringify({ url: checkoutUrl }));
+            if (text && phoneNumberId && accessToken) {
+              if (!conversations[from]) conversations[from] = [];
+              if (conversations[from].length > 10) conversations[from] = conversations[from].slice(-10);
+              conversations[from].push({role: 'user', content: text});
 
-      } catch(err) {
-        console.error('Checkout error:', err.message);
-        res.writeHead(500, {'Content-Type': 'application/json'});
-        res.end(JSON.stringify({ error: 'Failed to create checkout' }));
-      }
-    });
-    return;
-  }
+              try {
+                const reply = await callClaude(conversations[from]);
+                conversations[from].push({role: 'assistant', content: reply});
+                await sendWhatsAppReply(phoneNumberId, from, reply, accessToken);
+                console.log(`[Meta OUT] ${from}: ${reply}`);
+              } catch(err) {
+                console.error('Claude error:', err.message);
+                await sendWhatsAppReply(phoneNumberId, from, 'Blessings beloved. I am momentarily still. Please try again shortly. ✦', accessToken);
+              }
+            }
+          }
 
-  // ── WHATSAPP WEBHOOK ──
-  if (req.method === 'POST' && req.url === '/webhook') {
-    let body = '';
-    req.on('data', chunk => body += chunk);
-    req.on('end', async () => {
-      try {
-        const params = querystring.parse(body);
-        const from = params.From || '';
-        const msgBody = params.Body ? params.Body.trim() : '';
-        console.log(`[IN] ${from}: ${msgBody}`);
+          res.writeHead(200, {'Content-Type': 'application/json'});
+          res.end(JSON.stringify({status: 'ok'}));
 
-        if (!msgBody) {
+        } else {
+          // Twilio format
+          const params = querystring.parse(body);
+          const from = params.From || '';
+          const msgBody = params.Body ? params.Body.trim() : '';
+          console.log(`[Twilio IN] ${from}: ${msgBody}`);
+
+          if (!msgBody) {
+            res.writeHead(200, {'Content-Type': 'text/xml'});
+            res.end('<Response></Response>');
+            return;
+          }
+
+          if (!conversations[from]) conversations[from] = [];
+          if (conversations[from].length > 10) conversations[from] = conversations[from].slice(-10);
+          conversations[from].push({role: 'user', content: msgBody});
+
+          const reply = await callClaude(conversations[from]);
+          conversations[from].push({role: 'assistant', content: reply});
+          console.log(`[Twilio OUT] ${from}: ${reply}`);
+
+          const safe = reply.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
           res.writeHead(200, {'Content-Type': 'text/xml'});
-          res.end('<Response></Response>');
-          return;
+          res.end(`<?xml version="1.0" encoding="UTF-8"?><Response><Message>${safe}</Message></Response>`);
         }
-
-        if (!conversations[from]) conversations[from] = [];
-        if (conversations[from].length > 10) {
-          conversations[from] = conversations[from].slice(-10);
-        }
-
-        conversations[from].push({ role: 'user', content: msgBody });
-        const reply = await callClaude(conversations[from]);
-        conversations[from].push({ role: 'assistant', content: reply });
-
-        console.log(`[OUT] ${from}: ${reply}`);
-
-        const safe = reply.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${safe}</Message></Response>`;
-        res.writeHead(200, {'Content-Type': 'text/xml'});
-        res.end(twiml);
       } catch(err) {
         console.error('Error:', err.message);
         res.writeHead(200, {'Content-Type': 'text/xml'});
-        res.end(`<?xml version="1.0" encoding="UTF-8"?><Response><Message>Blessings beloved. I am momentarily still. Please try again shortly. ✦</Message></Response>`);
+        res.end(`<?xml version="1.0" encoding="UTF-8"?><Response><Message>Blessings beloved. I am momentarily still. ✦</Message></Response>`);
       }
     });
     return;
