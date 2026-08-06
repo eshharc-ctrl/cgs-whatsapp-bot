@@ -72,7 +72,7 @@ function sendWhatsAppReply(phoneNumberId, to, message, accessToken) {
     });
     const options = {
       hostname: 'graph.facebook.com',
-      path: `/v18.0/${phoneNumberId}/messages`,
+      path: `/v22.0/${phoneNumberId}/messages`,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
