@@ -5,6 +5,7 @@ const url = require('url');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'cgsapothecary2024';
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 
 const SYSTEM = `You are the Esh-har Spirit Guide for CG's Apothecary by Esh-har Collections. You respond to customers via WhatsApp.
 
@@ -88,6 +89,71 @@ function sendWhatsAppReply(phoneNumberId, to, message, accessToken) {
     req.on('error', reject);
     req.write(body);
     req.end();
+  });
+}
+
+// ── CORS headers for the website checkout ──
+const CHECKOUT_CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type'
+};
+
+// ── Create a Stripe Checkout Session from the cart ──
+// Uses the raw Stripe REST API (no extra npm packages needed).
+function createStripeCheckout(payload) {
+  return new Promise((resolve, reject) => {
+    const items = (payload && payload.items) || [];
+    const c = (payload && payload.customer) || {};
+    const p = [];
+    const add = (k, v) => p.push(encodeURIComponent(k) + '=' + encodeURIComponent(v));
+
+    add('mode', 'payment');
+    add('success_url', 'https://www.theunmuteateshharc.earth/?paid=1');
+    add('cancel_url', 'https://www.theunmuteateshharc.earth/apothecary');
+    if (c.email) add('customer_email', c.email);
+
+    items.forEach((it, i) => {
+      const label = it.size ? (it.name + ' (' + it.size + ')') : it.name;
+      const cents = Math.round(Number(it.price) * 100);
+      const qty = Math.max(1, parseInt(it.qty, 10) || 1);
+      add('line_items[' + i + '][price_data][currency]', 'usd');
+      add('line_items[' + i + '][price_data][product_data][name]', label);
+      add('line_items[' + i + '][price_data][unit_amount]', cents);
+      add('line_items[' + i + '][quantity]', qty);
+    });
+
+    // Store who ordered + where to ship in the payment's metadata (visible in Stripe)
+    add('metadata[customer_name]', c.name || '');
+    add('metadata[phone]', c.phone || '');
+    add('metadata[shipping]', [c.addr1, c.city, c.state, c.zip, c.country].filter(Boolean).join(', '));
+    if (c.notes) add('metadata[notes]', c.notes.slice(0, 480));
+
+    const body = p.join('&');
+    const options = {
+      hostname: 'api.stripe.com',
+      path: '/v1/checkout/sessions',
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + STRIPE_SECRET_KEY,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(body)
+      }
+    };
+    const sreq = https.request(options, (sres) => {
+      let data = '';
+      sres.on('data', ch => data += ch);
+      sres.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed && parsed.url) resolve(parsed.url);
+          else reject(new Error(parsed && parsed.error ? parsed.error.message : ('Stripe error: ' + data)));
+        } catch (e) { reject(e); }
+      });
+    });
+    sreq.on('error', reject);
+    sreq.write(body);
+    sreq.end();
   });
 }
 
@@ -200,6 +266,35 @@ const server = http.createServer(async (req, res) => {
         console.error('Error:', err.message);
         res.writeHead(200, {'Content-Type': 'text/xml'});
         res.end(`<?xml version="1.0" encoding="UTF-8"?><Response><Message>Blessings beloved. I am momentarily still. ✦</Message></Response>`);
+      }
+    });
+    return;
+  }
+
+  // ── CORS preflight for the website checkout ──
+  if (req.method === 'OPTIONS' && parsedUrl.pathname === '/create-checkout') {
+    res.writeHead(204, CHECKOUT_CORS);
+    res.end();
+    return;
+  }
+
+  // ── Website checkout: build a Stripe payment page from the cart ──
+  if (req.method === 'POST' && parsedUrl.pathname === '/create-checkout') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        if (!STRIPE_SECRET_KEY) throw new Error('STRIPE_SECRET_KEY is not set on the server');
+        const payload = JSON.parse(body || '{}');
+        if (!payload.items || !payload.items.length) throw new Error('Cart is empty');
+        const checkoutUrl = await createStripeCheckout(payload);
+        console.log('[Checkout] session created for ' + (payload.customer && payload.customer.email));
+        res.writeHead(200, Object.assign({'Content-Type': 'application/json'}, CHECKOUT_CORS));
+        res.end(JSON.stringify({ url: checkoutUrl }));
+      } catch (err) {
+        console.error('[Checkout] error:', err.message);
+        res.writeHead(500, Object.assign({'Content-Type': 'application/json'}, CHECKOUT_CORS));
+        res.end(JSON.stringify({ error: err.message }));
       }
     });
     return;
