@@ -122,7 +122,7 @@ function createStripeCheckout(payload) {
     const add = (k, v) => p.push(encodeURIComponent(k) + '=' + encodeURIComponent(v));
 
     add('mode', 'payment');
-    add('success_url', 'https://www.theunmuteateshharc.earth/?paid=1');
+    add('success_url', 'https://www.theunmuteateshharc.earth/apothecary?paid=1');
     add('cancel_url', 'https://www.theunmuteateshharc.earth/apothecary');
     if (c.email) add('customer_email', c.email);
 
