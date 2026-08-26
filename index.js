@@ -300,6 +300,49 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── CORS preflight for the website Spirit Guide chat widget ──
+  if (req.method === 'OPTIONS' && parsedUrl.pathname === '/chat') {
+    res.writeHead(204, CHECKOUT_CORS);
+    res.end();
+    return;
+  }
+
+  // ── Website Spirit Guide chat widget ──
+  if (req.method === 'POST' && parsedUrl.pathname === '/chat') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not set on the server');
+        const payload = JSON.parse(body || '{}');
+        let messages;
+        if (Array.isArray(payload.messages) && payload.messages.length) {
+          messages = payload.messages.map(m => ({
+            role: m.role === 'assistant' ? 'assistant' : 'user',
+            content: String(m.content != null ? m.content : (m.text || ''))
+          }));
+        } else {
+          const userText = payload.message || payload.text || payload.prompt || payload.input || payload.question || '';
+          messages = [{ role: 'user', content: String(userText) }];
+        }
+        if (!messages.length || !String(messages[messages.length - 1].content).trim()) {
+          throw new Error('No message provided');
+        }
+        const reply = await callClaude(messages);
+        console.log('[Website Chat] replied');
+        res.writeHead(200, Object.assign({'Content-Type': 'application/json'}, CHECKOUT_CORS));
+        // Send the reply under several common field names so the existing widget finds it
+        res.end(JSON.stringify({ reply: reply, response: reply, message: reply, text: reply, content: reply }));
+      } catch (err) {
+        console.error('[Website Chat] error:', err.message);
+        const grace = 'Blessings beloved. I am momentarily still. Please try again in a moment. \u2726';
+        res.writeHead(200, Object.assign({'Content-Type': 'application/json'}, CHECKOUT_CORS));
+        res.end(JSON.stringify({ reply: grace, response: grace, message: grace, text: grace, content: grace, error: err.message }));
+      }
+    });
+    return;
+  }
+
   res.writeHead(404);
   res.end('Not found');
 });
