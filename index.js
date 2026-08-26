@@ -118,6 +118,12 @@ function createStripeCheckout(payload) {
   return new Promise((resolve, reject) => {
     const items = (payload && payload.items) || [];
     const c = (payload && payload.customer) || {};
+    // We ship within the US only — block mispriced international orders here as a safety net.
+    const _country = String(c.country || '').trim().toLowerCase();
+    const US_OK = ['', 'us', 'usa', 'u.s.', 'u.s.a.', 'united states', 'united states of america', 'america'];
+    if (US_OK.indexOf(_country) === -1) {
+      return reject(new Error('We currently ship within the US only. For international orders, please message us on WhatsApp at (602) 791-8220 and we will arrange shipping just for you. \u2726'));
+    }
     const p = [];
     const add = (k, v) => p.push(encodeURIComponent(k) + '=' + encodeURIComponent(v));
 
@@ -135,6 +141,20 @@ function createStripeCheckout(payload) {
       add('line_items[' + i + '][price_data][unit_amount]', cents);
       add('line_items[' + i + '][quantity]', qty);
     });
+
+    // ── Shipping: $8 flat within the US, free at $80 and above ──
+    const FREE_SHIP_AT = 80;
+    const US_FLAT_SHIPPING = 8;
+    const subtotal = items.reduce(function (sum, it) {
+      return sum + Number(it.price) * Math.max(1, parseInt(it.qty, 10) || 1);
+    }, 0);
+    if (subtotal < FREE_SHIP_AT) {
+      const si = items.length;
+      add('line_items[' + si + '][price_data][currency]', 'usd');
+      add('line_items[' + si + '][price_data][product_data][name]', 'Shipping (US Flat Rate)');
+      add('line_items[' + si + '][price_data][unit_amount]', US_FLAT_SHIPPING * 100);
+      add('line_items[' + si + '][quantity]', 1);
+    }
 
     // Store who ordered + where to ship in the payment's metadata (visible in Stripe)
     add('metadata[customer_name]', c.name || '');
